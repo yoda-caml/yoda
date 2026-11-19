@@ -71,7 +71,11 @@ let prepare_workdir (job : Openapi.Job.t) =
         output_string oc s.content ;
         close_out oc ;
         Ok dir
-    with _ -> Error "Error occurred while processing the source artifact"
+    with e ->
+      Error
+        (Printf.sprintf
+           "Error occurred while processing the source artifact (%s)"
+           (Printexc.to_string e) )
   else if List.length sources > 1 then
     (* if there are multiple source artifacts, we need to process each one
        with the given namings. *)
