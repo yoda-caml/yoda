@@ -388,15 +388,35 @@ let process_job submission_id =
           >>= fun result -> write_result result job )
 
 (** Loop principal do worker.
-    Bloqueia com [BRPOP] na fila [submission:job] até haver um job,
-    processa-o com {!process_job} e repete indefinidamente. *)
-let rec worker () =
-  Lwt_pool.use Db.pool (fun conn -> Client.brpop conn ["submission:job"] 0)
-  >>= function
-  | None -> worker ()
-  | Some (_, job_str) -> process_job job_str >>= fun () -> worker ()
+    Usa uma ligação dedicada (fora da pool) para o [BRPOP] bloqueante na fila
+    [submission:job], para não esgotar a pool partilhada. Reconecta em caso
+    de erro. Cada job é processado com {!process_job}. *)
+let worker id () =
+  let rec loop conn =
+    Client.brpop conn ["submission:job"] 0
+    >>= function
+    | None -> loop conn
+    | Some (_, job_str) -> process_job job_str >>= fun () -> loop conn
+  in
+  let rec run () =
+    Lwt.catch
+      (fun () ->
+        Client.connect Db.config
+        >>= fun conn ->
+        Lwt.finalize
+          (fun () -> loop conn)
+          (fun () ->
+            Lwt.catch
+              (fun () -> Client.disconnect conn)
+              (fun _ -> Lwt.return_unit) ) )
+      (fun _ ->
+        Lwt_io.printf "Error in worker #%d loop, reconnecting...\n%!" id
+        >>= fun () -> Lwt_unix.sleep 1.0 )
+    >>= run
+  in
+  run ()
 
-(** Arranca 4 workers em paralelo via [Lwt.join] e [Lwt_preemptive].
+(** Arranca por defeito 4 workers em paralelo via [Lwt.join] e [Lwt_preemptive].
     Configura o thread pool com mínimo 4 e máximo 16 threads. *)
 let run () =
   let worker_count () =
@@ -423,4 +443,4 @@ let run () =
     >>= fun () ->
     Lwt_io.printf "YodaC worker iniciado em %s:%d com %d workers...\n%!"
       Db.host Db.port workers
-    >>= fun () -> Lwt.join (List.init workers (fun _ -> worker ())) )
+    >>= fun () -> Lwt.join (List.init workers (fun id -> worker id ())) )
